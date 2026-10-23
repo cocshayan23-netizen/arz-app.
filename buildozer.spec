@@ -1,14 +1,13 @@
 [app]
-title = Currency Rates
+title = NABZ Market Pulse
 package.name = currencyrates
 package.domain = org.example
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-version = 0.1
-requirements = python3==3.10.14,kivy==2.3.0,requests
-fullscreen = 0
+version = 0.2
+requirements = python3,kivy==2.3.0
 
 android.permissions = INTERNET
 

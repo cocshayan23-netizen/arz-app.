@@ -1,129 +1,166 @@
-"""
-اپلیکیشن نمایش قیمت ارز - نسخه اولیه
-سه دسته: ارز بین‌المللی / ارز دیجیتال / بازار آزاد ایران (نمونه)
-"""
+import threading
 
 import requests
 from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
-from kivy.uix.label import Label
-from kivy.uix.button import Button
-from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock
+from kivy.core.window import Window
+from kivy.metrics import dp
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.scrollview import ScrollView
+
+try:  # نمایش درست فارسی (اختیاری)
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+
+    def fa(text):
+        return get_display(arabic_reshaper.reshape(text))
+except Exception:
+    def fa(text):
+        return text
+
+# اگه فونت فارسی (مثلا Vazirmatn) کنار main.py گذاشتی، اینجا اسمش رو بذار
+FONT = "Vazirmatn-Regular.ttf"
+try:
+    open(FONT).close()
+except Exception:
+    FONT = "Roboto"
+
+Window.clearcolor = (0.07, 0.08, 0.11, 1)
+TIMEOUT = 12
 
 
-# ---------- توابع گرفتن داده از منابع مختلف ----------
-
-def fetch_forex_rates():
-    """قیمت ارزهای بین‌المللی نسبت به دلار (رایگان، بدون نیاز به API Key)"""
-    try:
-        resp = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=8)
-        data = resp.json()
-        rates = data.get("rates", {})
-        wanted = ["EUR", "GBP", "TRY", "AED", "JPY", "CNY"]
-        return [(code, rates[code]) for code in wanted if code in rates]
-    except Exception as e:
-        return [("خطا", str(e))]
+# ---------------------------------------------------------------- داده‌ها
+def fetch_fiat():
+    """نرخ ارزهای جهانی نسبت به دلار"""
+    r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=TIMEOUT)
+    rates = r.json()["rates"]
+    names = {"EUR": "یورو", "GBP": "پوند", "AED": "درهم امارات",
+             "TRY": "لیر ترکیه", "JPY": "ین ژاپن", "CAD": "دلار کانادا"}
+    # قیمت هر واحد ارز به دلار
+    return [(fa(n), f"${1 / rates[c]:,.4f}", None) for c, n in names.items()]
 
 
-def fetch_crypto_prices():
-    """قیمت چند ارز دیجیتال (رایگان، از CoinGecko)"""
-    try:
-        ids = "bitcoin,ethereum,tether,binancecoin,ripple"
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd"
-        resp = requests.get(url, timeout=8)
-        data = resp.json()
-        names = {
-            "bitcoin": "بیت‌کوین",
-            "ethereum": "اتریوم",
-            "tether": "تتر",
-            "binancecoin": "بایننس‌کوین",
-            "ripple": "ریپل",
-        }
-        return [(names.get(k, k), v.get("usd")) for k, v in data.items()]
-    except Exception as e:
-        return [("خطا", str(e))]
-
-
-def fetch_iran_market_rates():
-    """
-    نرخ بازار آزاد ایران (دلار/یورو/طلا).
-    نکته مهم: هیچ API رسمی و همیشه رایگانی برای این داده وجود نداره.
-    اینجا فعلاً داده نمونه (mock) گذاشته شده - باید بعداً با یک منبع
-    واقعی (مثل یک سرویس پولی/اسکرپینگ سایت‌های معتبر) جایگزین بشه.
-    """
+def fetch_gold():
+    """قیمت جهانی طلا (از طریق PAX Gold که معادل یک اونس طلاست)"""
+    r = requests.get(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={"ids": "pax-gold", "vs_currencies": "usd",
+                "include_24hr_change": "true"},
+        timeout=TIMEOUT,
+    )
+    d = r.json()["pax-gold"]
+    ounce = d["usd"]
+    ch = d.get("usd_24h_change")
     return [
-        ("دلار (نمونه)", "—"),
-        ("یورو (نمونه)", "—"),
-        ("طلای ۱۸ عیار (نمونه)", "—"),
+        (fa("طلا - هر اونس"), f"${ounce:,.2f}", ch),
+        (fa("طلا - هر گرم"), f"${ounce / 31.1035:,.2f}", ch),
     ]
 
 
-# ---------- ساخت UI هر تب ----------
+def fetch_crypto():
+    ids = {"bitcoin": "Bitcoin", "ethereum": "Ethereum", "tether": "Tether",
+           "binancecoin": "BNB", "solana": "Solana", "ripple": "XRP",
+           "dogecoin": "Dogecoin"}
+    r = requests.get(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={"ids": ",".join(ids), "vs_currencies": "usd",
+                "include_24hr_change": "true"},
+        timeout=TIMEOUT,
+    )
+    data = r.json()
+    return [(name, f"${data[i]['usd']:,.4f}".rstrip("0").rstrip("."),
+             data[i].get("usd_24h_change")) for i, name in ids.items() if i in data]
 
-class RateList(ScrollView):
-    def __init__(self, fetch_func, unit_label="$", **kwargs):
-        super().__init__(**kwargs)
-        self.fetch_func = fetch_func
-        self.unit_label = unit_label
-        self.grid = GridLayout(cols=2, size_hint_y=None, spacing=8, padding=8)
-        self.grid.bind(minimum_height=self.grid.setter("height"))
-        self.add_widget(self.grid)
-        self.refresh()
+
+def fetch_iran_market():
+    """
+    قیمت دلار بازار آزاد، سکه و طلای ایران (تومان).
+    این‌ها API رایگان و رسمی ثابتی ندارن؛ آدرس سرویس مورد اعتمادت
+    (یا API کلیددار) رو اینجا بذار و لیستی از (اسم، قیمت، تغییر) برگردون.
+    مثال خروجی: [(fa("دلار آزاد"), "۱۲۰,۰۰۰ تومان", None)]
+    """
+    return []
+
+
+SECTIONS = [
+    ("ارز", fetch_fiat),
+    ("طلا", fetch_gold),
+    ("بازار ایران", fetch_iran_market),
+    ("ارز دیجیتال", fetch_crypto),
+]
+
+
+# ---------------------------------------------------------------- رابط
+def make_label(text, size=16, color=(1, 1, 1, 1), halign="left", bold=False):
+    lb = Label(text=text, font_size=dp(size), color=color, font_name=FONT,
+               halign=halign, valign="middle", bold=bold,
+               size_hint_y=None, height=dp(size * 2.2))
+    lb.bind(size=lambda w, s: setattr(w, "text_size", s))
+    return lb
+
+
+class PriceRow(BoxLayout):
+    def __init__(self, name, price, change, **kw):
+        super().__init__(size_hint_y=None, height=dp(44), padding=(dp(8), 0), **kw)
+        self.add_widget(make_label(name, 16))
+        self.add_widget(make_label(price, 16, halign="right", bold=True))
+        if change is not None:
+            col = (0.3, 0.85, 0.45, 1) if change >= 0 else (0.95, 0.35, 0.35, 1)
+            self.add_widget(make_label(f"{change:+.2f}%", 13, col, "right"))
+
+
+class PriceApp(App):
+    def build(self):
+        self.title = "All Prices"
+        root = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+        root.add_widget(make_label(fa("قیمت همه چیز"), 22, halign="center", bold=True))
+
+        self.scroll = ScrollView()
+        self.box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(2))
+        self.box.bind(minimum_height=self.box.setter("height"))
+        self.scroll.add_widget(self.box)
+        root.add_widget(self.scroll)
+
+        self.status = make_label("", 12, (0.6, 0.6, 0.65, 1), "center")
+        root.add_widget(self.status)
+
+        btn = Button(text=fa("بروزرسانی"), font_name=FONT, size_hint_y=None,
+                     height=dp(50), background_normal="",
+                     background_color=(0.15, 0.45, 0.9, 1))
+        btn.bind(on_release=lambda *_: self.refresh())
+        root.add_widget(btn)
+
+        Clock.schedule_once(lambda dt: self.refresh(), 0.3)
+        Clock.schedule_interval(lambda dt: self.refresh(), 60)  # هر ۶۰ ثانیه
+        return root
 
     def refresh(self):
-        self.grid.clear_widgets()
-        rates = self.fetch_func()
-        for name, value in rates:
-            self.grid.add_widget(Label(text=str(name), size_hint_y=None, height=40))
-            display_value = f"{value} {self.unit_label}" if value != "—" else "—"
-            self.grid.add_widget(Label(text=str(display_value), size_hint_y=None, height=40))
+        self.status.text = fa("در حال دریافت...")
+        threading.Thread(target=self._load, daemon=True).start()
 
+    def _load(self):
+        results, errors = [], 0
+        for title, fn in SECTIONS:
+            try:
+                rows = fn()
+            except Exception:
+                rows, errors = [], errors + 1
+            results.append((title, rows))
+        Clock.schedule_once(lambda dt: self._render(results, errors))
 
-class RootLayout(BoxLayout):
-    def __init__(self, **kwargs):
-        super().__init__(orientation="vertical", **kwargs)
-
-        self.tabs = TabbedPanel(do_default_tab=False)
-
-        self.forex_tab = TabbedPanelItem(text="بین‌المللی")
-        self.forex_list = RateList(fetch_forex_rates, unit_label="(به ازای 1 دلار)")
-        self.forex_tab.add_widget(self.forex_list)
-
-        self.crypto_tab = TabbedPanelItem(text="کریپتو")
-        self.crypto_list = RateList(fetch_crypto_prices, unit_label="$")
-        self.crypto_tab.add_widget(self.crypto_list)
-
-        self.iran_tab = TabbedPanelItem(text="بازار آزاد ایران")
-        self.iran_list = RateList(fetch_iran_market_rates, unit_label="")
-        self.iran_tab.add_widget(self.iran_list)
-
-        self.tabs.add_widget(self.forex_tab)
-        self.tabs.add_widget(self.crypto_tab)
-        self.tabs.add_widget(self.iran_tab)
-
-        self.add_widget(self.tabs)
-
-        refresh_btn = Button(text="بروزرسانی قیمت‌ها", size_hint_y=None, height=50)
-        refresh_btn.bind(on_press=self.refresh_all)
-        self.add_widget(refresh_btn)
-
-    def refresh_all(self, *args):
-        self.forex_list.refresh()
-        self.crypto_list.refresh()
-        self.iran_list.refresh()
-
-
-class CurrencyApp(App):
-    def build(self):
-        self.title = "قیمت ارز"
-        root = RootLayout()
-        # بروزرسانی خودکار هر 5 دقیقه
-        Clock.schedule_interval(lambda dt: root.refresh_all(), 300)
-        return root
+    def _render(self, results, errors):
+        self.box.clear_widgets()
+        for title, rows in results:
+            if not rows:
+                continue
+            self.box.add_widget(make_label(fa(title), 18, (0.4, 0.7, 1, 1), bold=True))
+            for name, price, ch in rows:
+                self.box.add_widget(PriceRow(name, price, ch))
+        msg = "بروزرسانی شد" if not errors else "بعضی بخش‌ها دریافت نشد (اینترنت؟)"
+        self.status.text = fa(msg)
 
 
 if __name__ == "__main__":
-    CurrencyApp().run()
+    PriceApp().run()
